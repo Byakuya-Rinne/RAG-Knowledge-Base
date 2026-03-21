@@ -12,11 +12,11 @@ initial_state = create_custom_state(
 # 只输出更最终的状态值（字典形式），不包含节点名称、执行日志、元数据等额外信息
 # 执行工作流并返回最终状态
 
-# 非流式输出
+# 非流式输出, 在外部只能全都执行结束 -> 拿到最终状态
 final_state = kb_import_app.invoke(initial_state)
 logger.info(f"工作流执行完成！最终状态: {final_state}")
 
-# 流式输出
+# 流式输出, 在外部每个节点执行结束 -> 拿到当前节点状态
 # final_state = None
 # for chunk in kb_import_app.stream(initial_state):
 #     node_name, node_state = next(iter(chunk.items()))
