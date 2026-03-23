@@ -1,6 +1,7 @@
 import shutil
 import time
 import zipfile
+from os import rename
 from pathlib import Path
 from time import sleep
 
@@ -39,9 +40,13 @@ class NodePdfToMd(NodeBase):
         #3. 下载解压获取的压缩包，且正确重命名
         md_path = self._step_3_download_and_extract(full_zip_url, output_dir_obj, pdf_path_obj.stem)
 
-        #4. 读取文档内容md_content，填写md_path
+        #4. 读取文档内容md_content
+        with open(md_path, 'r', encoding="utf-8") as f:
+            md_content = f.read()
 
-
+        # 步骤5：更新state状态值
+        state["md_content"] = md_content
+        state["md_path"] = md_path
 
         return state
 
@@ -200,6 +205,50 @@ class NodePdfToMd(NodeBase):
 
 
     def _step_3_download_and_extract(self, zip_url: str, output_dir_obj: Path, pdf_stem: str) -> str:
+
+        # 下载解压获取的压缩包，且正确重命名
+        logger.info(f"【ZIP下载】开始下载ZIP包：{zip_url} ...")
+        download_response = requests.get(zip_url, timeout=120)
+
+        if not download_response.status_code == 200:
+            raise RuntimeError(f"【ZIP下载】ZIP包下载失败：状态码：{download_response.status_code}")
+
+
+        # zip文件Path对象
+        zip_save_path = output_dir_obj / f"{pdf_stem}_result.zip"
+
+
+        with open(zip_save_path, "wb") as file:
+            file.write(download_response.content)
+        logger.info(f"【ZIP下载】ZIP包下载成功：保存路径：{zip_save_path}")
+
+        # 清空旧的解压目录
+        logger.info(f"【ZIP解压】开始解压ZIP包：{output_dir_obj} ...")
+        # 要解压的目录
+        extract_target_dir = output_dir_obj / pdf_stem
+
+        # 清空要解压文件存放的目录
+        if extract_target_dir.exists():
+            try:
+                shutil.rmtree(extract_target_dir)
+                logger.info(f"【ZIP解压】已清空旧的解压目录：{extract_target_dir}")
+            except Exception as e:
+                logger.warning(f"【ZIP解压】清空旧的解压目录失败，但是不影响文件解压：{str(e)}")
+
+        # 路径.mkdir( ) 新建文件夹
+        extract_target_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(zip_save_path, "r") as zip_file_obj:
+            zip_file_obj.extractall(extract_target_dir)
+        logger.info(f"【ZIP解压】ZIP解压完成，解压目录：{extract_target_dir}")
+
+        # 重命名full.md文件
+        md_file = extract_target_dir / "full.md"
+        renamed_md_filepath = md_file.with_name(f"{pdf_stem}.md") #返回一个新的 Path 对象，即重命名的目标
+        md_file.rename(renamed_md_filepath)
+        logger.info(f"【MD重命名】重命名成功，文件名：{pdf_stem}.md")
+
+        return str(renamed_md_filepath.absolute())
 
 
 
