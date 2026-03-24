@@ -248,38 +248,8 @@ class NodePdfToMd(NodeBase):
         md_file.rename(renamed_md_filepath)
         logger.info(f"【MD重命名】重命名成功，文件名：{pdf_stem}.md")
 
+
         return str(renamed_md_filepath.absolute())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        return ""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
