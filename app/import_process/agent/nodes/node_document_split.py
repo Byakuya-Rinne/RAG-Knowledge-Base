@@ -1,4 +1,6 @@
+import json
 import re
+from pathlib import Path
 from typing import Tuple, List, Dict
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -78,20 +80,14 @@ class NodeDocumentSplit(NodeBase):
         # 合并:
         # 前一part字数小于最小字数的, 如果加后一part小于最大长度, 则合并 (需相同父标题)
         sections = self._step_4_refine_chunks(sections)
+        
+        
+        # 5. 输出统计信息
+        self._step_5_print_stats(lines_count, sections)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+        # 6. 本地JSON备份 + 状态更新
+        state["chunks"] = sections
+        self._step_6_backup(state, sections)
         return state
 
 
@@ -163,7 +159,7 @@ class NodeDocumentSplit(NodeBase):
 
                 current_title = stripped_line
                 title_count = title_count + 1
-                current_lines = [stripped_line] #当前章节内容目前只有标题这一行
+                current_lines = [stripped_line] # 把标题写入当前章节内容，也就是content总是以标题开头
                 logger.info(f"识别标题：{current_title}")
 
             #不是标题，普通行或者代码块
@@ -225,19 +221,20 @@ class NodeDocumentSplit(NodeBase):
         # 每个过大的 section 切分为：文档标题、章节标题 - 索引（当前章节的第几部分）、正文
         # 每部分加起来小于最大长度
         # 每部分切割结果:
-            # title-part: chunk_text
+            # title\n\n chunk_text
 
         # section 添加的字段:
         #           part(本段文字是本章节的第几部分)
         #           parent(父标题)
 
-        # section:
+        # 输入 section:
         # "title":        # 当前章节的标题
         # "content":      # 当前标题到下个标题中间的内容
         # "file_title":   # 文件大标题
 
         # 每一章节的内容
         content = section.get("content", "") or ""
+        content = content.strip()
 
         # 内容不超长
         if len(content) <= MAX_CONTENT_LENGTH:
@@ -251,10 +248,12 @@ class NodeDocumentSplit(NodeBase):
             logger.warning(f"章节标题过长，无法切分：{title[:20]}...")
             return [section]
 
-        # # 清理正文重复标题：避免原章节中正文开头重复标题，导致子Chunk内容冗余
-        # body = content
-        # if title and body.lstrip().startswith(title):
-        #     body = body[body.find(title) + len(title):].lstrip()
+        # 步骤2会导致content开头总是标题, 清理之
+        # if content.startswith(title):
+        #     content = content[len(title):]  #无法清除标题后面的换行/空格
+
+        if title and content.lstrip().startswith(title):
+            content = content[content.find(title) + len(title):].lstrip()
 
 
         # 初始化LangChain递归分割器（核心工具：按优先级分隔符切分，保留语义）
@@ -268,6 +267,7 @@ class NodeDocumentSplit(NodeBase):
 
         sub_contents = []
 
+        # enumerate同时拿到index和遍历内容, start属性设置index起始值
         for index, chunk in enumerate(splitter.split_text(content), start=1):
 
             # 清理空内容：跳过切分后的空字符串
@@ -291,25 +291,109 @@ class NodeDocumentSplit(NodeBase):
 
         return sub_contents
 
-    def _merge_short_sections(self, not_long_sections) -> List[Dict[str, str]]:
-        pass
+    def _merge_short_sections(self, not_long_sections: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        #输入: 可能是短的[{title: 标题, "content":内容...}, { }, { }]
+        #输出: 最终的[{}, {}]
+        final_section = []
+        last_section = None # 上一个章节
 
+        if not not_long_sections:
+            return []
 
+        for current_not_long_section in not_long_sections:
+            current_content = current_not_long_section.get("content", "")
 
+            # 长度没到需要合并的底限, 本段不拼接, 且把上一段和本段都输出
+            if len(current_content) >= MIN_CONTENT_LENGTH:
+                if last_section is not None:
+                    final_section.append(last_section)
+                    last_section = None
+                final_section.append(current_not_long_section)
+                continue
 
+            #这一段长度太短，可以考虑合并(如果和上一段内容标题不同则不合并)
+            else:
 
+                # 如果上一段是空的，也就是第一轮循环，把本段写到上一段中，退出本轮循环
+                if last_section is None:
+                    last_section = current_not_long_section
+                    continue
 
+                # 如果上一段加这一段太长，则不能合并，把上一段输出，这一段等待合并
+                if len(last_section.get("content", "")) + len(current_content) > MAX_CONTENT_LENGTH:
+                    final_section.append(last_section)
+                    last_section = current_not_long_section
+                    continue
 
+                #   如果和上一段内容标题不同则不合并
+                if not last_section.get("parent_title") == current_not_long_section.get("parent_title"):
+                    final_section.append(last_section)
+                    last_section = current_not_long_section
+                    continue
 
+                # 上一步已经给无父标题的段落添加了“无标题”
+                # 和前一段标题相同，合并
+                else:
+                    # 取出前一段的前缀(标题 + \n\n)作为新前缀, 把后一段剩余content拼接
+                    parent_title = current_not_long_section.get("parent_title")
+                    if parent_title and current_content.startswith(parent_title + "\n\n"):
+                        current_content = current_content[len(parent_title) + 2:].lstrip()
+                        last_section["content"] = last_section["content"] + "\n\n" + current_content
+                        # 把上一块的part标签改为最新的一块，如果注释掉，就是把上一块标签当作最后合并完的标签用
+                        # if "part" in current_not_long_section:
+                        #     last_section["part"] = current_not_long_section["part"]
+                        logger.debug(f"合并短Chunk：{last_section.get('parent_title')} → 累计长度{len(last_section['content'])}")
+                    continue
+        if last_section is not None:
+            final_section.append(last_section)
+        return final_section
 
+    def _step_5_print_stats(self, lines_count, sections):
+        """
+        【步骤5】输出文档切分统计信息（日志记录，便于监控/调试）
+        :param lines_count: MD原始文本总行数
+        :param sections: 最终处理后的Chunk列表
+        """
+        chunk_num = len(sections)
+        # 输出核心统计信息：原始行数/最终Chunk数/首个Chunk预览
+        logger.info("-" * 50 + " 文档切分统计信息 " + "-" * 50)
+        logger.info(f"MD原始文本总行数：{lines_count}")
+        logger.info(f"最终生成Chunk数量：{chunk_num}")
+        if sections:
+            first_title = sections[0].get("title", "无标题")
+            logger.info(f"首个Chunk标题预览：{first_title}")
+        logger.info("-" * 110)
 
+    def _step_6_backup(self, state, sections):
+        """
+        【步骤6】Chunk结果本地JSON备份（便于调试/问题排查，保留处理结果）
+        :param state: 项目状态字典，需包含md_dir（备份目录）
+        :param sections: 最终处理后的Chunk列表
+        """
 
-
-
-
-
-
-
+        try:
+            # 拼接备份文件路径：固定文件名，便于查找
+            backup_path = Path(state["md_path"]).parent / "chunks.json"
+            # 写入JSON文件：保留中文/格式化缩进，便于人工查看
+            with open(backup_path, "w", encoding="utf-8") as f:
+                """
+                sections是Python 嵌套数据结构（List[Dict[str, str]]，列表里装字典，字典里可能嵌套字符串 / 数字等），而普通文件写入
+                （如f.write(sections)）仅支持写入字符串，直接写 Python 数据结构会报错。
+                json.dump的核心作用就是：将 Python 原生数据结构（列表、字典、字符串、数字等）直接序列化并写入 JSON 文件，无需手动转换为字符串，
+                同时保证数据格式规范、可跨语言 / 跨场景读取，完美适配「Chunk 列表备份」的需求。
+                """
+                json.dump(
+                    sections,
+                    f,
+                    #开启 True："title": "\u4e00\u7ea7\u6807\u9898"（乱码，无法直接看）；
+                    #开启 False："title": "一级标题"（正常中文，人工可直接阅读）。
+                    ensure_ascii=False,  # 保留中文，不转义为\u编码
+                    indent=2             # 格式化缩进，便于阅读
+                )
+            logger.info(f"步骤6：Chunk结果备份成功，备份文件路径：{backup_path}")
+        except Exception as e:
+            # 备份失败仅记录日志，不终止主流程
+            logger.error(f"步骤6：Chunk结果备份失败，错误信息：{str(e)}", exc_info=False)
 
 #       AI生成，未验证
 # def _step_2_split_by_titles(self, content: str, file_title: str) -> Tuple[List[Dict[str, str]], int, int]:
