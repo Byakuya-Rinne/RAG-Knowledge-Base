@@ -1,9 +1,19 @@
 import re
 from typing import Tuple, List, Dict
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from app.core.logger import logger
 from app.import_process.agent.node_base import NodeBase
 from app.import_process.agent.state import ImportGraphState
+
+
+
+
+
+MIN_CONTENT_LENGTH = 500  #每一段content最短是多少
+MAX_CONTENT_LENGTH = 1200  #每一段content最长是多少
+
 
 class NodeDocumentSplit(NodeBase):
     """
@@ -38,11 +48,42 @@ class NodeDocumentSplit(NodeBase):
         # 1. 加载数据
         # 从状态字典提取MD内容、文件标题，统一换行符消除系统差异，做空值兜底
         # 输出：标准化后的md_content、文件标题；无有效MD内容则直接终止节点执行
-        content, file_title = self._step_1_get_inputs(state)
+        md_content, file_title = self._step_1_get_inputs(state)
+
+
 
         # 2. 按标题粗切
         # 输出：初切后的章节列表、识别到的有效标题数量、MD原始文本总行数
-        sections, title_count, lines_count = self._step_2_split_by_titles(content, file_title)
+        sections, title_count, lines_count = self._step_2_split_by_titles(md_content, file_title)
+
+        # "title": current_title,   # 当前章节的标题
+        # "content":                # 当前标题到下个标题中间的内容
+        # "file_title":             # 文件大标题
+
+
+
+        # 3. 无标题处理
+        # 如果全文都没出现过标题，则整体添加“无标题”的一级标题
+        sections, title_count = self._step_3_handle_no_title(md_content, sections, title_count, file_title)
+
+
+
+        # 4. 细切+合并
+        # 每个过大的 section 切分为：文档标题、章节标题 - 索引（当前章节的第几部分）、正文
+        # section 添加的字段:
+        #           part(本段文字是本章节的第几部分)
+        #           parent(父标题)
+        # 每部分加起来小于最大长度
+        #
+        # 合并:
+        # 前一part字数小于最小字数的, 如果加后一part小于最大长度, 则合并 (需相同父标题)
+        sections = self._step_4_refine_chunks(sections)
+
+
+
+
+
+
 
 
 
@@ -100,10 +141,9 @@ class NodeDocumentSplit(NodeBase):
             if not current_lines:
                 return
             sections.append({
-                "title": current_title,
-                # 每段时间使用 \n换行区分
-                "content": "\n".join(current_lines),
-                "file_title": file_title,
+                "title": current_title, #当前章节的标题
+                "content": "\n".join(current_lines), #当前标题到下个标题中间的内容
+                "file_title": file_title,  #文件大标题
             })
 
 
@@ -135,6 +175,124 @@ class NodeDocumentSplit(NodeBase):
         return sections, title_count, len(lines)
 
 
+    def _step_3_handle_no_title(self, md_content: str, sections: List[Dict[str, str]], title_count: int, file_title: str):
+        if title_count == 0:
+            logger.warning(f"步骤3：未识别到任何MD标题，将全文作为单个章节处理，文件：{file_title}")
+            title_added_section = [{"title": "本段无标题",
+                                    "content":md_content,
+                                    "file_title":file_title}]
+            title_count = 1
+        else:
+            title_added_section = sections
+            logger.info(f"已识别到 {title_count} 个标题，文件：{file_title}")
+        return title_added_section, title_count
+
+
+
+    def _step_4_refine_chunks(self, sections) -> List[Dict[str, str]]:
+        """
+        【步骤4】Chunk精细化处理（核心：长切短合，适配大模型/检索）
+        执行流程：1.切分超长章节 2.合并过短章节 3.父标题兜底（适配Milvus向量库schema）
+        :param sections: 步骤3处理后的章节列表
+        :return: 长度适中、低碎片化的最终Chunk列表
+        """
+        # section:
+        # "title": current_title,   # 当前章节的标题
+        # "content":                # 当前标题到下个标题中间的内容
+        # "file_title":             # 文件大标题
+
+        not_long_sections = []
+        for section in sections:
+        #   切分长section
+            not_long_sections.extend(self._split_long_section(section))
+        logger.info(f"已切分超长章节，共生成{len(not_long_sections)}个chunk")
+
+        #   合并短section，需要当前section与下一个section
+        final_sections = self._merge_short_sections(not_long_sections)
+        logger.info(f"已合并过短章节，最终得到{len(final_sections)}个chunk")
+
+
+        return final_sections
+
+    def _split_long_section(self, section: Dict[str, str]) -> List[Dict[str, str]]:
+        """
+        【辅助函数】超长章节二次切分（核心适配LangChain分割器）
+        功能：单个章节内容超限时，按「段落→句子→空格」从粗到细切分，保留语义
+        切分规则：1.先按空行(\n\n)(段落) 2.再按换行(\n) 3.最后按中英文标点/空格
+        :param section: 原始章节字典，必须包含content键，可选title/file_title等
+        :return: 切分后的子章节列表，每个子章节带父标题/序号等元信息
+        """
+        # 每个过大的 section 切分为：文档标题、章节标题 - 索引（当前章节的第几部分）、正文
+        # 每部分加起来小于最大长度
+        # 每部分切割结果:
+            # title-part: chunk_text
+
+        # section 添加的字段:
+        #           part(本段文字是本章节的第几部分)
+        #           parent(父标题)
+
+        # section:
+        # "title":        # 当前章节的标题
+        # "content":      # 当前标题到下个标题中间的内容
+        # "file_title":   # 文件大标题
+
+        # 每一章节的内容
+        content = section.get("content", "") or ""
+
+        # 内容不超长
+        if len(content) <= MAX_CONTENT_LENGTH:
+            return [section]
+
+        file_title = section.get("file_title")
+        title = section.get("title", "") or ""
+        prefix = f"{title}\n\n" if title else ""
+        available_len = MAX_CONTENT_LENGTH - len(prefix)
+        if available_len <= 0:
+            logger.warning(f"章节标题过长，无法切分：{title[:20]}...")
+            return [section]
+
+        # # 清理正文重复标题：避免原章节中正文开头重复标题，导致子Chunk内容冗余
+        # body = content
+        # if title and body.lstrip().startswith(title):
+        #     body = body[body.find(title) + len(title):].lstrip()
+
+
+        # 初始化LangChain递归分割器（核心工具：按优先级分隔符切分，保留语义）
+        # separators：分割符优先级（从粗到细），优先按大语义单元切分，最后才硬拆
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=available_len,  # 正文部分最大长度（已扣除标题）
+            chunk_overlap=0,           # 无重叠：按标题切分后语义完整，无需重叠
+            # 分割符优先级：空行(段落)→换行→中文标点→英文标点→空格，最后硬拆
+            separators=["\n\n", "\n", "。", "！", "？", "；", ".", "!", "?", ";", " "],
+        )
+
+        sub_contents = []
+
+        for index, chunk in enumerate(splitter.split_text(content), start=1):
+
+            # 清理空内容：跳过切分后的空字符串
+            chunk_text = chunk.strip()
+            if chunk_text == "":
+                continue
+
+            # 每部分切割结果:
+            # title-part: chunk_text
+
+            chunk_text = prefix + chunk_text
+            sub_contents.append({
+                "title": f"{title}-{index}",
+                "content": chunk_text,
+                "parent_title": title,
+                "part": index,
+                "file_title": file_title
+            })
+        logger.debug(f"超长章节切分完成：{title} → 生成{len(sub_contents)}个子Chunk")
+
+
+        return sub_contents
+
+    def _merge_short_sections(self, not_long_sections) -> List[Dict[str, str]]:
+        pass
 
 
 
@@ -153,30 +311,7 @@ class NodeDocumentSplit(NodeBase):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#       AI生成，未验证
 # def _step_2_split_by_titles(self, content: str, file_title: str) -> Tuple[List[Dict[str, str]], int, int]:
     #     """
     #     【步骤2】按Markdown标题初次切分（核心：按#分级切分，跳过代码块内标题）

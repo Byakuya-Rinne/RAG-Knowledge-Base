@@ -15,4 +15,7 @@ dependencies = [
     "minio>=7.2.20",
     "numpy>=2.4.3",
     "pymongo>=4.16.0",
+    "torch>=2.11.0",
+    "torchaudio>=2.11.0",
+    "torchvision>=0.26.0",
 ]
