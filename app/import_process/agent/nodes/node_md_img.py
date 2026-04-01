@@ -303,9 +303,119 @@ class NodeMdImg(NodeBase):
         :param target_images: 待处理图片列表，元素为(图片文件名, 图片完整路径, 图片上下文)
         :return: 图片URL字典，键：图片文件名，值：MinIO访问URL
         """
+        url_mapping = {}
+        # 假设类中有 self.bucket 和 self.endpoint 属性，用于指定存储桶和MinIO服务地址
+        for filename, filepath, _ in target_images:  # 忽略上下文参数
+            # 构造对象存储路径（目录+文件名）
+            object_name = f"{upload_dir}/{filename}"
+            logger.info(f"上传图片：{object_name}")
+            img_url = self._upload_to_minio(minio_client, filepath, object_name)
+            if img_url is not None:
+                url_mapping[filename] = img_url
+        return url_mapping
 
 
 
-    def _step_5_backup_new_md_file(self, param, new_md_content):
-                pass
+    def _upload_to_minio(self, minio_client: Minio, local_path: str, object_name: str) -> str | None:
+        """
+        将单张本地图片上传至MinIO对象存储，并返回公网可访问URL
+        :param minio_client: 初始化完成的MinIO客户端对象
+        :param local_path: 图片本地完整路径
+        :param object_name: MinIO中要存储的对象名称
+        :return: 图片MinIO访问URL（上传失败返回None）
+        """
+        try:
+            logger.info(f"开始上传图片至MinIO：本地路径：{local_path}，MinIO对象：{object_name}")
+
+            minio_client.fput_object(bucket_name = minio_config.bucket_name,
+                                     object_name = object_name,
+                                     file_path = local_path,
+                                     content_type = f"image/{os.path.splitext(local_path)[1][1:]}")
+                                    # os.path.splitext(local_path) 将文件路径拆分成 (文件名, 扩展名)，例如 ('/path/to/photo', '.jpg')。
+                                    # [1] 取扩展名部分，如 '.jpg'。
+                                    # [1:] 从索引 1 开始切片，去掉开头的点，得到纯扩展名字符串，如 'jpg'。
+                                    # 最终通过 f-string 拼成 "image/jpg"，即 MIME 类型。
+            protocol  = "https" if minio_config.minio_secure else "http"
+            img_url = f"{protocol}://{minio_config.endpoint}/{minio_config.bucket_name}/{object_name}"
+            logger.info(f"图片上传成功，访问URL：{img_url}")
+            return img_url
+        except Exception as e:
+            logger.error(f"图片上传MinIO失败：{local_path}，错误信息：{str(e)}")
+            return None
+
+
+
+    def _merge_summary_and_url(self, summaries: Dict[str, str], urls: Dict[str, str]) -> Dict[str, Tuple[str, str]]:
+        """
+        合并图片摘要字典和URL字典，过滤掉上传失败无URL的图片
+        :param summaries: 图片摘要字典，键：图片文件名，值：内容摘要
+        :param urls: 图片URL字典，键：图片文件名，值：MinIO访问URL
+        :return: 合并后的图片信息字典，键：图片文件名，值：(摘要, URL)元组
+        """
+
+        image_info = {}
+        for img_file, summary in summaries:
+            url = urls.get(img_file)
+            if url:
+                image_info[img_file] = (summary, url)
+        logger.info(f"图片摘要与url合并完成，共{len(image_info)}条图片信息")
+        return image_info
+
+
+
+    def _process_md_file(self, md_content: str, image_info: Dict[str, Tuple[str, str]]) -> str:
+        """
+        核心功能：替换MD内容中的本地图片引用为MinIO远程引用
+        替换规则：![原描述](本地路径) → ![图片摘要](MinIO访问URL)
+        :param md_content: 原始MD文件内容
+        :param image_info: 合并后的图片信息字典，键：图片文件名，值：(摘要, URL)
+        :return: 替换后的新MD内容
+
+        ![summary](url)
+        """
+
+        # for image_file, summary, new_url in image_info.items(): 不能
+        for image_file, (summary, new_url) in image_info.items():
+            pattern = re.compile(r"!\[.*?\]\(.*?" + re.escape(image_file) + r".*?\)")
+            md_content = pattern.sub(lambda m: f"![{summary}]({new_url})", md_content)
+            logger.info(f"完成图片引用的替换：{image_file} || {new_url} || {summary} ")
+
+        logger.info(f"MD文件图片引用替换完成，共{len(image_info)}张图片")
+        return md_content
+
+
+
+
+
+
+
+
+
+    def _step_5_backup_new_md_file(self, origin_md_path: str, md_content: str) -> str:
+        """
+        步骤5：将处理后的MD内容保存为新文件（原文件不变，避免数据丢失）
+        新文件命名规则：原文件名 + _new.md（如test.md → test_new.md）
+        :param origin_md_path: 原始MD文件完整路径
+        :param md_content: 处理后的新MD内容
+        :return: 新MD文件的完整路径
+        """
+
+        new_md_file_name = os.path.splitext(origin_md_path)[0] + "_new.md"
+        with open(new_md_file_name, "w", encoding="utf-8") as f :
+            f.write(md_content)
+        logger.info(f"已保存处理后的MD文件，新文件是：{new_md_file_name}")
+        return new_md_file_name
+
+
+
+
+
+
+
+
+
+
+
+
+
 
