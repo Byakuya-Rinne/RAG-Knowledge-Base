@@ -11,13 +11,13 @@ from app.query_process.agent.nodes.node_rrf import NodeRrf
 from app.query_process.agent.nodes.node_search_embedding import NodeSearchEmbedding
 from app.query_process.agent.nodes.node_search_embedding_hyde import NodeSearchEmbeddingHyde
 from app.query_process.agent.nodes.node_web_search_mcp import NodeWebSearchMcp
-from app.query_process.agent.state import QueryGraphState, create_default_state
+from app.query_process.agent.state import QueryGraphState, create_custom_state
 
 # 初始化环境变量（类加载前执行，保证全局生效）
 load_dotenv()
 
 
-class ImportWorkflow:
+class QueryWorkflow:
     """
     知识库查询工作流类
     封装LangGraph工作流的构建、编译、执行逻辑，支持自定义配置和多实例运行
@@ -156,11 +156,11 @@ class ImportWorkflow:
 if __name__ == "__main__":
 
     # 定义初始状态
-    initial_state = create_default_state(
+    initial_state = create_custom_state(
         task_id="task_001",
         session_id="query_20260331_001",
         original_query="如何使用万用表测量电压？"
     )
     # 流式输出
-    for chunk in ImportWorkflow.create_and_run(initial_state, stream=True):
+    for chunk in QueryWorkflow.create_and_run(initial_state, stream=True):
         pass
