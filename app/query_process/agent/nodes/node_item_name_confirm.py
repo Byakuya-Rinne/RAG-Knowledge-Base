@@ -285,3 +285,100 @@ class NodeItemNameConfirm(NodeBase):
                 logger.error(f"步骤5：查询商品名 '{item_names[i]}' 时出错: {e}。跳过本轮，继续操作；如果全部失败，交由下个环节处理")
 
         return results
+
+    def _step_6_align_item_names(self, query_results) -> dict:
+        """
+        6 根据Milvus搜索评分，逐个对齐step5提取的item_names，生成「确认商品名」和「候选商品名」
+        对齐规则（优先级a>b>c>d）：
+                a  如果只有一个匹配结果评分高于0.85 → 直接确认该商品名
+                b  如果多条匹配结果评分超过0.85 → 优先取与原始提取名相同的，无则取分数最高的
+                c  如果无0.85分以上结果 → 取分数≥0.6的最高前5个作为候选
+                d  如果无0.6分及以上结果 → 不返回任何商品名（确认+候选均为空）
+        :param query_results: 列表[字典] - step5的返回结果，每个商品名的搜索匹配数据（格式同step5返回值）
+                query_results 列表[字典] - 格式：
+                                [
+                                    {
+                                        "extracted_name": "提取的原始商品名",  # 如"苹果15"
+                                        "matches": [                          # 该商品名的TopN匹配结果，无则空列表
+                                            {
+                                                "item_name": "数据库中的商品名",  # Milvus中存储的标准化商品名
+                                                "score": 0.98                  # 混合搜索的相似度评分（0-1，越高越相似）
+                                            },
+                                            ...
+                                        ]
+                                    },
+                                    ...
+                                ]
+        :return: 字典 - 商品名对齐结果，包含确认列表和候选列表，格式：
+                 {
+                     "confirmed_item_names": ["确认商品名1", "确认商品名2"],  # 去重后的确认商品名，无则空列表
+                     "options": ["候选商品名1", "候选商品名2", ...]          # 去重后的候选商品名，无则空列表
+                 }
+        """
+        confirmed_item_names: List[str] = []
+        options: List[str] = []
+
+        logger.info(f"步骤6：获得待处理的数据源：{query_results}")
+
+        for query_result in query_results:
+            extracted_name = (query_result.get("extracted_name", "") or  "").strip()
+
+            matches = query_result.get("matches", []) or []
+
+            # 若无匹配结果，直接跳过当前商品名的对齐
+            if not matches:
+                continue
+
+            # 筛选高置信度匹配结果：评分>0.85
+            high = [m for m in matches if m.get("score", 0) > 0.85]
+            # 筛选中置信度匹配结果：评分≥0.6（仅高置信度为空时生效）
+            mid = [m for m in matches if m.get("score", 0) >= 0.6]
+
+            # 规则a: 只有一个高置信度结果（>0.85）→ 直接确认该商品名
+            if len(high) == 1:
+                confirmed_item_names.append(high[0].get("item_name"))
+                continue  # 匹配到规则a，跳过后续规则判断
+
+            # 规则b: 多条高置信度结果（>0.85）
+            if len(high) > 1:
+                highest = {"item_name": "", "score": 0}
+                for high_one in high:
+                    if high_one.get("item_name") == extracted_name:
+                        highest = high_one
+                        break
+                    if high_one.get("score") > highest.get("score"):
+                        highest = high_one
+                confirmed_item_names.append(highest.get("item_name"))
+                continue
+
+            # 规则c: 无0.85分以上结果，取≥0.6分的最高前5个作为候选
+            # 注：高置信度列表high为空时才会走到此处（规则a/b均不满足）
+            if len(mid) > 0:
+                # 取中置信度结果的前5个，加入候选列表
+                for m in mid[:5]:
+                    # confirmed_item_names 为空
+                    options.append(m.get("item_name"))
+
+            # 规则d: 无0.6分及以上结果 → 不做任何操作，确认+候选列表均为空
+        return {
+                    "confirmed_item_names": list(set(confirmed_item_names)),  # 去重，避免重复确认
+                    "options": list(set(options))  # 去重，避免重复候选
+                }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
