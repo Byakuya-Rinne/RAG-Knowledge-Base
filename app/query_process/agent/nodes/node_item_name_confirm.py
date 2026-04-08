@@ -366,6 +366,60 @@ class NodeItemNameConfirm(NodeBase):
                 }
 
 
+    def _step_7_check_confirmation(self, state, align_result, history):
+        """
+        7 检查step6对齐后的商品名状态，分3种分支更新state，并同步更新历史消息的商品名关联
+        :param state: 字典 - 原始会话状态，包含session_id/original_query等核心字段
+        :param align_result: 字典 - step6的对齐结果
+        :param history: 列表[字典] - 近期会话历史
+        :return: 字典 - 更新后的会话状态，包含item_names/answer
+        """
+        # 从对齐结果中提取确认商品名列表，无则空列表
+        confirmed = align_result.get("confirmed_item_names", [])
+        # 从对齐结果中提取候选商品名列表，无则空列表
+        options = align_result.get("options", [])
+
+        # 分支A：有确认的商品名（高置信度，无需用户确认）
+        if confirmed:
+            # 收集历史消息中未关联商品名的消息ID（需批量更新关联）
+            ids_to_update = []
+
+            for message in history:
+                if not message.get("item_names"):
+                    message_id = message.get("_id")
+                    if message_id:
+                        ids_to_update.append(str(message_id))
+            # 若存在需更新的消息ID，批量更新历史消息的商品名关联
+            if ids_to_update:
+                update_message_item_names(ids_to_update, confirmed)
+
+            # 更新会话状态：设置确认商品名、改写后的查询
+            state["item_names"] = confirmed
+            # 若状态中存在旧答案，删除（避免干扰后续流程）
+            if "answer" in state:
+                del state["answer"]
+            # 返回更新后的状态
+            return state
+
+        # 分支B：无确认商品名，但有候选商品名（中置信度，需拼接提示词让用户确认）
+        if options:
+            # 候选商品名拼接为字符串（取前3个，避免过长），格式："商品1、商品2、商品3"
+            options_str = "、".join(options[:3])
+            # 构造向用户确认的提示语
+            answer = f"您是想问以下哪个产品：{options_str}？请明确一下型号。"
+            # 更新会话状态：设置确认提示语、清空商品名列表
+            state["answer"] = answer
+            state["item_names"] = []
+            return state
+
+        # 分支C：无确认商品名，且无候选商品名（无匹配结果，需用户重新提供）
+        state["answer"] = "抱歉，未找到相关产品，请提供准确型号以便我为您查询。"
+        state["item_names"] = []
+        return state
+
+
+
+
 
 
 
